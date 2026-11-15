@@ -1,0 +1,149 @@
+#pragma once
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2020 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ *
+ * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+ */
+
+#include <atomic>
+#include <filesystem>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include <rex/system/kernel_state.h>
+#include <rex/system/xam/app_manager.h>
+#include <rex/thread/mutex.h>
+
+namespace rex {
+namespace kernel {
+namespace xam {
+namespace apps {
+
+// Only source of docs for a lot of these functions:
+// https://github.com/oukiar/freestyledash/blob/master/Freestyle/Scenes/Media/Music/ScnMusic.cpp
+
+class XmpApp : public system::xam::App {
+ public:
+  enum class State : uint32_t {
+    kIdle = 0,
+    kPlaying = 1,
+    kPaused = 2,
+  };
+  enum class PlaybackClient : uint32_t {
+    kSystem = 0,
+    kTitle = 1,
+  };
+  // XMP_PLAYBACKMODE_* / XMP_REPEATMODE_* (PGR4 asks for shuffle, repeat
+  // playlist).
+  enum class PlaybackMode : uint32_t {
+    kInOrder = 0,
+    kShuffle = 1,
+  };
+  enum class RepeatMode : uint32_t {
+    kPlaylist = 0,
+    kNoRepeat = 1,
+  };
+  struct Song {
+    enum class Format : uint32_t {
+      kWma = 0,
+      kMp3 = 1,
+    };
+
+    uint32_t handle;
+    std::u16string file_path;
+    std::u16string name;
+    std::u16string artist;
+    std::u16string album;
+    std::u16string album_artist;
+    std::u16string genre;
+    uint32_t track_number;
+    uint32_t duration_ms;
+    Format format;
+    // A custom soundtrack file (xmp_custom.h), decoded from the host instead
+    // of the title's file system.
+    std::filesystem::path host_path;
+  };
+  struct Playlist {
+    uint32_t handle;
+    std::u16string name;
+    uint32_t flags;
+    std::vector<std::unique_ptr<Song>> songs;
+  };
+
+  explicit XmpApp(system::KernelState* kernel_state);
+
+  X_HRESULT XMPGetStatus(uint32_t status_ptr);
+
+  X_HRESULT XMPCreateTitlePlaylist(uint32_t songs_ptr, uint32_t song_count,
+                                   uint32_t playlist_name_ptr, const std::u16string& playlist_name,
+                                   uint32_t flags, uint32_t out_song_handles,
+                                   uint32_t out_playlist_handle);
+  X_HRESULT XMPDeleteTitlePlaylist(uint32_t playlist_handle);
+  X_HRESULT XMPPlayTitlePlaylist(uint32_t playlist_handle, uint32_t song_handle);
+  X_HRESULT XMPContinue();
+  X_HRESULT XMPStop(uint32_t unk);
+  X_HRESULT XMPPause();
+  X_HRESULT XMPNext();
+  X_HRESULT XMPPrevious();
+
+  X_HRESULT DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+                                uint32_t buffer_length) override;
+
+ private:
+  static const uint32_t kMsgStateChanged = 0x0A000001;
+  static const uint32_t kMsgPlaybackBehaviorChanged = 0x0A000002;
+  static const uint32_t kMsgPlaybackControllerChanged = 0x0A000003;
+
+  void OnStateChanged();
+  // Adds the player's own music (xmp_custom.h) to a playlist the title just
+  // created, or puts it in place of the title's songs.
+  void ApplyCustomSoundtrack(Playlist* playlist);
+  // Starts decoding and playing song `index` of `playlist` (the playlist and
+  // song become active at once; the audio follows once decoded).
+  void PlaySong(Playlist* playlist, size_t index);
+  // The song after (step 1) or before (-1) the active one, by the playback
+  // and repeat modes; -1 when the playlist has ended.
+  int StepSongIndex(int step);
+  // Plays the next song once the active one has played out (real XMP moves
+  // through the playlist by itself; titles only wait for the next song).
+  void WatchForTrackEnd();
+
+  State state_;
+  PlaybackClient playback_client_;
+  PlaybackMode playback_mode_;
+  RepeatMode repeat_mode_;
+  uint32_t unknown_flags_;
+  float volume_;
+  Playlist* active_playlist_;
+  int active_song_index_;
+  // Set once a decoded track is queued for output, cleared on stop, so the
+  // watcher only advances after a track that really played.
+  std::atomic<bool> track_queued_{false};
+  uint32_t shuffle_state_ = 0x9E3779B9u;
+  // Shuffle plays every song of the playlist once, in a random order, before
+  // any plays again (a fresh pick per song kept repeating a few of them).
+  // Previous walks back through it.
+  uint32_t NextRandom();
+  // A new random order of the active playlist with `first` at its start.
+  void Reshuffle(int first);
+  Playlist* shuffle_playlist_ = nullptr;
+  std::vector<int> shuffle_order_;
+  size_t shuffle_pos_ = 0;
+
+  rex::thread::global_critical_region global_critical_region_;
+  std::unordered_map<uint32_t, Playlist*> playlists_;
+  uint32_t next_playlist_handle_;
+  uint32_t next_song_handle_;
+};
+
+}  // namespace apps
+}  // namespace xam
+}  // namespace kernel
+}  // namespace rex
